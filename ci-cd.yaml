@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
 
 env:
-  DOCKER_IMAGE_NAME: ${{ secrets.DOCKER_IMAGE_NAME || 'your-dockerhub-username/re-shopping-cart-web-app' }}
+  DOCKER_IMAGE_NAME: ${{ secrets.DOCKER_IMAGE_NAME || 'b22dcat268/re-shopping-cart-web-app' }}
   DOCKER_IMAGE_TAG: ${{ github.sha }}
 
 jobs:
