@@ -1,101 +1,59 @@
-name: CI/CD Pipeline
+name: Build & Deploy Spring Boot App to AWS EC2
 
 on:
   push:
-    branches:
-      - main
-      - master
-  pull_request:
-    branches:
-      - main
-      - master
-  workflow_dispatch:
-
-env:
-  DOCKER_IMAGE_NAME: ${{ secrets.DOCKER_IMAGE_NAME || 'b22dcat268/re-shopping-cart-web-app' }}
-  DOCKER_IMAGE_TAG: ${{ github.sha }}
+    branches: [main]
 
 jobs:
-  build-and-deploy:
+  build-push-deploy:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      - name: Checkout source code
         uses: actions/checkout@v4
 
-      - name: Set up JDK 21
-        uses: actions/setup-java@v4
-        with:
-          java-version: "21"
-          distribution: "temurin"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
 
-      - name: Grant execute permission for gradlew
-        run: chmod +x gradlew
-
-      - name: Build with Gradle
-        run: ./gradlew clean build -x test
-
-      - name: Build Docker image
-        run: |
-          docker build -t ${{ env.DOCKER_IMAGE_NAME }}:${{ env.DOCKER_IMAGE_TAG }} .
-          docker tag ${{ env.DOCKER_IMAGE_NAME }}:${{ env.DOCKER_IMAGE_TAG }} ${{ env.DOCKER_IMAGE_NAME }}:latest
-
-      - name: Login to Docker Hub
+      - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKER_HUB_USERNAME }}
-          password: ${{ secrets.DOCKER_HUB_PASSWORD }}
+          username: ${{ secrets.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_TOKEN }}
 
-      - name: Push Docker image to Docker Hub
-        run: |
-          docker push ${{ env.DOCKER_IMAGE_NAME }}:${{ env.DOCKER_IMAGE_TAG }}
-          docker push ${{ env.DOCKER_IMAGE_NAME }}:latest
-
-      - name: Setup SSH
-        uses: webfactory/ssh-agent@v0.9.0
+      - name: Build and push Docker image to Docker Hub
+        uses: docker/build-push-action@v5
         with:
-          ssh-private-key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          context: .
+          push: true
+          tags: ${{ secrets.DOCKER_USER }}/re-shopping-cart-web-app:latest
 
-      - name: Deploy to EC2
-        env:
-          EC2_HOST: ${{ secrets.EC2_HOST }}
-          EC2_USER: ${{ secrets.EC2_USER || 'ec2-user' }}
-        run: |
-          ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} << 'EOF'
-            # Stop existing container if running
-            docker stop re-shopping-cart-web-app || true
-            docker rm re-shopping-cart-web-app || true
-            
-            # Remove old image to free space
-            docker rmi ${{ env.DOCKER_IMAGE_NAME }}:latest || true
-            
-            # Login to Docker Hub
-            echo "${{ secrets.DOCKER_HUB_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_HUB_USERNAME }}" --password-stdin
-            
-            # Pull latest image
-            docker pull ${{ env.DOCKER_IMAGE_NAME }}:latest
-            
-            # Run new container
+      - name: SSH into EC2 and deploy container
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_KEY }}
+          script: |
+            echo ">>> Stopping and removing old container if exists"
+            docker rm -f re-shopping-cart-web-app || true
+            docker rmi ${{ secrets.DOCKER_USER }}/re-shopping-cart-web-app:latest || true
+
+            echo ">>> Pulling latest image from Docker Hub"
+            docker pull ${{ secrets.DOCKER_USER }}/re-shopping-cart-web-app:latest
+
+            echo ">>> Running container"
             docker run -d \
               --name re-shopping-cart-web-app \
               --restart unless-stopped \
               -p 8080:8080 \
               -e SPRING_PROFILES_ACTIVE=prod \
-              -e DB_URL="${{ secrets.DB_URL }}" \
-              -e DB_USERNAME="${{ secrets.DB_USERNAME }}" \
-              -e DB_PASSWORD="${{ secrets.DB_PASSWORD }}" \
-              -e HIBERNATE_DDL_AUTO=none \
-              -e HIBERNATE_SHOW_SQL=false \
-              -e THYMELEAF_CACHE=true \
-              ${{ env.DOCKER_IMAGE_NAME }}:latest
-            
-            # Clean up unused images
-            docker image prune -f
-          EOF
+              -e DB_URL='${{ secrets.DB_URL }}' \
+              -e DB_USERNAME='${{ secrets.DB_USERNAME }}' \
+              -e DB_PASSWORD='${{ secrets.DB_PASSWORD }}' \
+              -e JAVA_OPTS="-Xms512m -Xmx512m -XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0" \
+              -e TZ=UTC \
+              ${{ secrets.DOCKER_USER }}/re-shopping-cart-web-app:latest
 
-      - name: Verify deployment
-        env:
-          EC2_HOST: ${{ secrets.EC2_HOST }}
-        run: |
-          sleep 10
-          curl -f http://${EC2_HOST}:8080/ || echo "Application may still be starting up"
+            echo ">>> Status & logs"
+            docker ps -a --filter "name=re-shopping-cart-web-app"
